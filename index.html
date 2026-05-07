@@ -451,11 +451,11 @@ function App() {
               <span className="ui-font">速度</span>
               <input
                 type="range"
-                min={120}
+                min={20}
                 max={1500}
-                step={20}
-                value={1620 - autoDelay}
-                onChange={(e) => setAutoDelay(1620 - Number(e.target.value))}
+                step={10}
+                value={1520 - autoDelay}
+                onChange={(e) => setAutoDelay(1520 - Number(e.target.value))}
                 className="w-32 accent-amber-400"
               />
               <span style={{ color: C.text, minWidth: 38 }}>{autoDelay}ms</span>
