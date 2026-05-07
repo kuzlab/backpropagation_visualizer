@@ -585,9 +585,26 @@ function NetworkDiagram({
     >
       {/* layer labels */}
       <g style={{ fontFamily: '"IBM Plex Sans", sans-serif', fontSize: 11, fill: C.dim, letterSpacing: 2 }}>
-        <text x={INPUT_X} y={28} textAnchor="middle">INPUT</text>
-        <text x={HIDDEN_X} y={28} textAnchor="middle">HIDDEN · tanh</text>
-        <text x={OUTPUT_X} y={28} textAnchor="middle">OUTPUT</text>
+        <text x={INPUT_X} y={20} textAnchor="middle">INPUT</text>
+        <text x={HIDDEN_X} y={20} textAnchor="middle">HIDDEN · tanh</text>
+        <text x={OUTPUT_X} y={20} textAnchor="middle">OUTPUT</text>
+      </g>
+
+      {/* operation labels between columns — show which weights/biases apply where */}
+      <g style={{ fontFamily: '"IBM Plex Mono", monospace', fontSize: 12 }}>
+        <text x={(INPUT_X + HIDDEN_X) / 2} y={44} textAnchor="middle" fill={C.dim}>
+          <tspan>h = tanh( </tspan>
+          <tspan fill={C.fwd} fontWeight="600">W₁</tspan>
+          <tspan>·x + </tspan>
+          <tspan fill={C.fwd} fontWeight="600">b₁</tspan>
+          <tspan> )</tspan>
+        </text>
+        <text x={(HIDDEN_X + OUTPUT_X) / 2} y={44} textAnchor="middle" fill={C.dim}>
+          <tspan>ŷ = </tspan>
+          <tspan fill={C.fwd} fontWeight="600">W₂</tspan>
+          <tspan>·h + </tspan>
+          <tspan fill={C.fwd} fontWeight="600">b₂</tspan>
+        </text>
       </g>
 
       {/* axis lines (subtle) */}
