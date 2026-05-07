@@ -289,7 +289,7 @@ export default function App() {
         .pill { transition: all 0.2s; }
         button.action:disabled { opacity: 0.3; cursor: not-allowed; }
         button.action:not(:disabled):hover { transform: translateY(-1px); }
-        .display-font { font-family: "Instrument Serif", serif; font-style: italic; }
+        .display-font { font-family: "IBM Plex Sans", system-ui, sans-serif; font-weight: 500; }
         .ui-font { font-family: "IBM Plex Sans", system-ui, sans-serif; }
       `}</style>
 
