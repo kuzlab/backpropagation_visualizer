@@ -1,0 +1,1230 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Backpropagation Visualizer</title>
+
+  <!-- Tailwind (Play CDN) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Babel standalone for in-browser JSX transpile -->
+  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" />
+
+  <style>
+    html, body { margin: 0; padding: 0; background: #0a0e1a; color: #e2e8f0; }
+    /* Hide loading once React mounts */
+    #boot-loading { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+      font-family: "IBM Plex Mono", monospace; color: #64748b; font-size: 13px; letter-spacing: 2px; }
+    #root:not(:empty) ~ #boot-loading { display: none; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <div id="boot-loading">LOADING · COMPILING JSX…</div>
+
+  <script type="text/babel" data-type="module" data-presets="react">
+    import React, { useState, useEffect, useCallback, useMemo, useRef } from 'https://esm.sh/react@18.3.1';
+    import { createRoot } from 'https://esm.sh/react-dom@18.3.1/client';
+    import { Play, Pause, RotateCcw, ChevronRight, ArrowRight, ArrowLeft, Sparkles, Shuffle, Target } from 'https://esm.sh/lucide-react@0.383.0?deps=react@18.3.1';
+
+
+const HIDDEN_SIZE = 4;
+const INPUT_SIZE = 3;
+
+// ---------- PRNG ----------
+function mulberry32(seed) {
+  let s = seed >>> 0;
+  return function () {
+    s = (s + 0x6D2B79F5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// ---------- Math ----------
+function initParams(seed) {
+  const rand = mulberry32(seed);
+  const r = (scale = 1) => (rand() - 0.5) * 2 * scale;
+  return {
+    W1: Array.from({ length: HIDDEN_SIZE }, () =>
+      Array.from({ length: INPUT_SIZE }, () => r(0.8))
+    ),
+    b1: Array.from({ length: HIDDEN_SIZE }, () => r(0.2)),
+    W2: Array.from({ length: HIDDEN_SIZE }, () => r(0.8)),
+    b2: r(0.2),
+  };
+}
+
+function forward(p, x) {
+  const z1 = p.W1.map(
+    (row, i) => row.reduce((s, w, j) => s + w * x[j], 0) + p.b1[i]
+  );
+  const a1 = z1.map(Math.tanh);
+  const y = p.W2.reduce((s, w, i) => s + w * a1[i], 0) + p.b2;
+  return { z1, a1, y };
+}
+
+function backward(p, x, target, f) {
+  const dy = f.y - target;
+  const dW2 = f.a1.map((a) => dy * a);
+  const db2 = dy;
+  const da1 = p.W2.map((w) => dy * w);
+  const dz1 = da1.map((d, i) => d * (1 - f.a1[i] ** 2));
+  const dW1 = dz1.map((dz) => x.map((xi) => dz * xi));
+  const db1 = [...dz1];
+  return { dy, dW2, db2, da1, dz1, dW1, db1 };
+}
+
+function update(p, g, lr) {
+  return {
+    W1: p.W1.map((row, i) => row.map((w, j) => w - lr * g.dW1[i][j])),
+    b1: p.b1.map((b, i) => b - lr * g.db1[i]),
+    W2: p.W2.map((w, i) => w - lr * g.dW2[i]),
+    b2: p.b2 - lr * g.db2,
+  };
+}
+
+const TARGET_FNS = {
+  weighted: { name: 'y = 0.5·x₁ + 0.3·x₂ − 0.2·x₃', fn: (x) => 0.5 * x[0] + 0.3 * x[1] - 0.2 * x[2] },
+  sum:      { name: 'y = (x₁ + x₂ + x₃) / 3',       fn: (x) => (x[0] + x[1] + x[2]) / 3 },
+  product:  { name: 'y = x₁ · x₂ · 0.5',             fn: (x) => x[0] * x[1] * 0.5 },
+  abs:      { name: 'y = |x₁| − |x₂|',               fn: (x) => Math.abs(x[0]) - Math.abs(x[1]) },
+};
+
+function newSample() {
+  const r = () => Math.round((Math.random() * 2 - 1) * 100) / 100;
+  return [r(), r(), r()];
+}
+
+const fmt = (n, d = 3) => {
+  if (!isFinite(n)) return '—';
+  const s = n.toFixed(d);
+  return n >= 0 ? '+' + s : s;
+};
+
+// ---------- Diagram geometry ----------
+const SVG_W = 780;
+const SVG_H = 460;
+const INPUT_X = 95;
+const HIDDEN_X = 390;
+const OUTPUT_X = 685;
+const INPUT_YS = [115, 230, 345];
+const HIDDEN_YS = [70, 180, 280, 390];
+const OUTPUT_Y = 230;
+const NODE_R = 30;
+
+// ---------- Colors ----------
+const C = {
+  bg: '#0a0e1a',
+  panel: 'rgba(20, 28, 48, 0.6)',
+  panelBorder: 'rgba(148, 163, 184, 0.12)',
+  text: '#e2e8f0',
+  dim: '#64748b',
+  fwd: '#fbbf24',         // amber - forward values
+  fwdGlow: 'rgba(251, 191, 36, 0.35)',
+  grad: '#c084fc',        // purple - gradients
+  gradGlow: 'rgba(192, 132, 252, 0.35)',
+  loss: '#f87171',
+  posW: 'rgba(251, 191, 36, ALPHA)',  // amber for positive weights
+  negW: 'rgba(56, 189, 248, ALPHA)',  // sky for negative weights
+};
+
+function weightStroke(w, baseAlpha = 1) {
+  const m = Math.min(Math.abs(w), 1.5) / 1.5;
+  const a = baseAlpha * (0.18 + 0.82 * m);
+  if (w >= 0) return `rgba(251, 191, 36, ${a})`;
+  return `rgba(56, 189, 248, ${a})`;
+}
+function weightWidth(w) {
+  return 0.5 + Math.min(Math.abs(w), 1.8) * 1.6;
+}
+
+// ---------- Phase logic ----------
+const PHASE_LABEL = {
+  ready:    { ja: '入力セット',     en: 'READY',     color: '#94a3b8' },
+  forward:  { ja: '順伝播完了',     en: 'FORWARD',   color: '#fbbf24' },
+  backward: { ja: '逆伝播完了',     en: 'BACKWARD',  color: '#c084fc' },
+  updated:  { ja: '重み更新後',     en: 'UPDATED',   color: '#34d399' },
+};
+
+const PHASE_NEXT_BUTTON = {
+  ready:    '1. 順伝播',
+  forward:  '2. 逆伝播',
+  backward: '3. 重み更新',
+  updated:  '4. 次サンプル',
+};
+
+// ============================================================
+//                       APP
+// ============================================================
+function App() {
+  const [seed, setSeed] = useState(42);
+  const [params, setParams] = useState(() => initParams(42));
+  const [inputs, setInputs] = useState([0.6, -0.4, 0.8]);
+  const [targetType, setTargetType] = useState('weighted');
+  const [phase, setPhase] = useState('ready');
+  const [step, setStep] = useState(0);
+  const [losses, setLosses] = useState([]);
+  const [lr, setLr] = useState(0.1);
+  const [isAuto, setIsAuto] = useState(false);
+  const [autoDelay, setAutoDelay] = useState(650);
+  const [hovered, setHovered] = useState(null); // { type, key, ...info }
+
+  // ---- termination conditions ----
+  // 0 = disabled. Triggered only during auto-run.
+  const [maxSteps, setMaxSteps] = useState(0);
+  const [lossThreshold, setLossThreshold] = useState(0);
+  const [lossWindow, setLossWindow] = useState(10); // moving-average window for the loss check
+  const [stopReason, setStopReason] = useState(null);
+
+  const target = useMemo(() => TARGET_FNS[targetType].fn(inputs), [inputs, targetType]);
+  const fwd = useMemo(() => forward(params, inputs), [params, inputs]);
+  const grads = useMemo(() => backward(params, inputs, target, fwd), [params, inputs, target, fwd]);
+  const loss = 0.5 * (fwd.y - target) ** 2;
+
+  // moving-average loss over the last `lossWindow` recorded steps
+  const avgLoss = useMemo(() => {
+    if (losses.length === 0) return Infinity;
+    const slice = losses.slice(-lossWindow);
+    return slice.reduce((s, v) => s + v, 0) / slice.length;
+  }, [losses, lossWindow]);
+
+  // ---- transitions ----
+  const advance = useCallback(() => {
+    setPhase((prev) => {
+      if (prev === 'ready') return 'forward';
+      if (prev === 'forward') return 'backward';
+      if (prev === 'backward') {
+        setParams((p) => update(p, grads, lr));
+        setLosses((l) => [...l.slice(-149), loss]);
+        setStep((s) => s + 1);
+        return 'updated';
+      }
+      if (prev === 'updated') {
+        setInputs(newSample());
+        return 'ready';
+      }
+      return prev;
+    });
+  }, [grads, lr, loss]);
+
+  const reset = useCallback(() => {
+    const ns = Math.floor(Math.random() * 100000);
+    setSeed(ns);
+    setParams(initParams(ns));
+    setInputs(newSample());
+    setStep(0);
+    setLosses([]);
+    setPhase('ready');
+    setIsAuto(false);
+    setStopReason(null);
+  }, []);
+
+  const startAuto = useCallback(() => {
+    setStopReason(null);
+    setIsAuto((a) => !a);
+  }, []);
+
+  // auto-run with termination checks
+  useEffect(() => {
+    if (!isAuto) return;
+    // Check termination conditions before scheduling next phase.
+    // We check at the moment a full step has just completed (phase 'updated'),
+    // so that the user sees the final state before auto-run halts.
+    if (phase === 'updated') {
+      if (maxSteps > 0 && step >= maxSteps) {
+        setIsAuto(false);
+        setStopReason(`最大ステップ数 ${maxSteps} に到達 (loss = ${loss.toFixed(5)})`);
+        return;
+      }
+      if (lossThreshold > 0 && avgLoss < lossThreshold) {
+        setIsAuto(false);
+        setStopReason(`直近${lossWindow}ステップの平均ロス ${avgLoss.toFixed(5)} < しきい値 ${lossThreshold}`);
+        return;
+      }
+    }
+    const t = setTimeout(advance, autoDelay);
+    return () => clearTimeout(t);
+  }, [isAuto, phase, autoDelay, advance, maxSteps, step, lossThreshold, avgLoss, lossWindow, loss]);
+
+  // visibility flags for animation
+  const showHidden = phase !== 'ready';
+  const showOutput = phase !== 'ready';
+  const showGrad = phase === 'backward' || phase === 'updated';
+
+  // ============================================================
+  //                       RENDER
+  // ============================================================
+  return (
+    <div
+      className="min-h-screen w-full"
+      style={{
+        background: `radial-gradient(ellipse at 50% 0%, rgba(30,41,59,0.55) 0%, ${C.bg} 60%)`,
+        color: C.text,
+        fontFamily: '"IBM Plex Mono", ui-monospace, "SF Mono", monospace',
+      }}
+    >
+      <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" />
+      <style>{`
+        .grid-bg {
+          background-image:
+            repeating-linear-gradient(0deg, transparent 0, transparent 39px, rgba(255,255,255,0.025) 39px, rgba(255,255,255,0.025) 40px),
+            repeating-linear-gradient(90deg, transparent 0, transparent 39px, rgba(255,255,255,0.025) 39px, rgba(255,255,255,0.025) 40px);
+        }
+        .pulse-fwd { animation: pulseFwd 1.2s ease-out; }
+        @keyframes pulseFwd {
+          0% { stroke-dashoffset: 60; opacity: 0.3; }
+          100% { stroke-dashoffset: 0; opacity: 1; }
+        }
+        .pulse-bwd { animation: pulseBwd 1.2s ease-out; }
+        @keyframes pulseBwd {
+          0% { stroke-dashoffset: -60; opacity: 0.3; }
+          100% { stroke-dashoffset: 0; opacity: 1; }
+        }
+        .fade-in { animation: fadeIn 0.5s ease-out forwards; }
+        @keyframes fadeIn {
+          from { opacity: 0; transform: scale(0.85); }
+          to { opacity: 1; transform: scale(1); }
+        }
+        /* forward values fall in diagonally from the upper-left */
+        .slide-fwd { animation: slideFwd 0.65s cubic-bezier(0.2, 0.8, 0.3, 1) forwards; }
+        @keyframes slideFwd {
+          0%   { opacity: 0; transform: translate(-26px, -26px); }
+          55%  { opacity: 1; }
+          100% { opacity: 1; transform: translate(0, 0); }
+        }
+        /* backward gradients rise in diagonally from the lower-right */
+        .slide-bwd { animation: slideBwd 0.65s cubic-bezier(0.2, 0.8, 0.3, 1) forwards; }
+        @keyframes slideBwd {
+          0%   { opacity: 0; transform: translate(26px, 26px); }
+          55%  { opacity: 1; }
+          100% { opacity: 1; transform: translate(0, 0); }
+        }
+        /* trail ghost text behind the value during animation */
+        .slide-fwd-trail { animation: trailFwd 0.6s ease-out forwards; }
+        @keyframes trailFwd {
+          0%   { opacity: 0.55; transform: translate(-18px, -18px); }
+          100% { opacity: 0; transform: translate(0, 0); }
+        }
+        .slide-bwd-trail { animation: trailBwd 0.6s ease-out forwards; }
+        @keyframes trailBwd {
+          0%   { opacity: 0.55; transform: translate(18px, 18px); }
+          100% { opacity: 0; transform: translate(0, 0); }
+        }
+        .pill { transition: all 0.2s; }
+        button.action:disabled { opacity: 0.3; cursor: not-allowed; }
+        button.action:not(:disabled):hover { transform: translateY(-1px); }
+        .display-font { font-family: "Instrument Serif", serif; font-style: italic; }
+        .ui-font { font-family: "IBM Plex Sans", system-ui, sans-serif; }
+      `}</style>
+
+      <div className="grid-bg max-w-[1280px] mx-auto px-6 py-6">
+        {/* ============ HEADER ============ */}
+        <header className="flex items-end justify-between mb-5 pb-4 border-b" style={{ borderColor: C.panelBorder }}>
+          <div>
+            <div className="flex items-baseline gap-3">
+              <h1 className="display-font text-3xl tracking-tight" style={{ color: C.text }}>
+                Backpropagation
+              </h1>
+              <span className="text-xs ui-font tracking-widest" style={{ color: C.dim }}>
+                VISUALIZER · 3-4-1 NETWORK
+              </span>
+            </div>
+            <p className="text-xs mt-1" style={{ color: C.dim }}>
+              tanh hidden · linear output · MSE loss · vanilla SGD
+            </p>
+          </div>
+
+          <div className="flex items-center gap-5">
+            <Stat label="STEP" value={String(step).padStart(4, '0')} />
+            <Stat label="LOSS" value={fmt(loss, 4).replace(/^\+/, '')} accent={C.loss} />
+            <div className="flex flex-col items-end">
+              <span className="text-[10px] tracking-widest" style={{ color: C.dim }}>PHASE</span>
+              <span className="text-sm font-medium tracking-wider" style={{ color: PHASE_LABEL[phase].color }}>
+                {PHASE_LABEL[phase].en} · {PHASE_LABEL[phase].ja}
+              </span>
+            </div>
+          </div>
+        </header>
+
+        {/* ============ MAIN GRID ============ */}
+        <div className="grid grid-cols-12 gap-4">
+          {/* ----- network diagram ----- */}
+          <section
+            className="col-span-12 lg:col-span-8 rounded-lg p-4"
+            style={{ background: C.panel, border: `1px solid ${C.panelBorder}` }}
+          >
+            <NetworkDiagram
+              params={params}
+              inputs={inputs}
+              fwd={fwd}
+              grads={grads}
+              target={target}
+              phase={phase}
+              showHidden={showHidden}
+              showOutput={showOutput}
+              showGrad={showGrad}
+              hovered={hovered}
+              setHovered={setHovered}
+            />
+
+            {/* hover detail */}
+            <div
+              className="mt-3 p-3 rounded text-xs leading-relaxed"
+              style={{ background: 'rgba(0,0,0,0.25)', border: `1px solid ${C.panelBorder}`, minHeight: 78 }}
+            >
+              {hovered ? (
+                <HoverDetail h={hovered} />
+              ) : (
+                <div style={{ color: C.dim }}>
+                  <span className="display-font text-base mr-2">▸</span>
+                  ノード or エッジにホバーすると、その箇所の計算式と数値が表示されます。
+                  <br />
+                  <span style={{ color: C.fwd }}>● 順伝播値</span> ／
+                  <span style={{ color: C.grad }}> ● 勾配 (∂L/∂・)</span> ／
+                  <span style={{ color: 'rgba(251, 191, 36, 0.9)' }}> ━ 正の重み</span> ／
+                  <span style={{ color: 'rgba(56, 189, 248, 0.9)' }}> ━ 負の重み</span>
+                </div>
+              )}
+            </div>
+          </section>
+
+          {/* ----- side panels ----- */}
+          <aside className="col-span-12 lg:col-span-4 flex flex-col gap-3">
+            <SamplePanel
+              inputs={inputs}
+              target={target}
+              prediction={fwd.y}
+              loss={loss}
+              targetType={targetType}
+              setTargetType={setTargetType}
+              setInputs={setInputs}
+            />
+            <LossChart losses={losses} />
+            <ParamsPanel params={params} grads={grads} showGrad={showGrad} setHovered={setHovered} />
+          </aside>
+        </div>
+
+        {/* ============ CONTROLS ============ */}
+        <div
+          className="mt-4 rounded-lg p-3 flex flex-col gap-3"
+          style={{ background: C.panel, border: `1px solid ${C.panelBorder}` }}
+        >
+          {/* ---- row 1: step / auto / speed / lr / reset ---- */}
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              className="action pill px-4 py-2 rounded text-sm font-medium tracking-wide"
+              onClick={advance}
+              style={{
+                background: PHASE_LABEL[phase].color,
+                color: '#0a0e1a',
+              }}
+            >
+              <ChevronRight className="inline w-4 h-4 mr-1 -mt-0.5" />
+              {PHASE_NEXT_BUTTON[phase]}
+            </button>
+
+            <div className="h-6 w-px" style={{ background: C.panelBorder }} />
+
+            <button
+              className="action pill px-3 py-2 rounded text-sm flex items-center gap-1.5"
+              onClick={startAuto}
+              style={{
+                background: isAuto ? '#34d399' : 'rgba(148,163,184,0.1)',
+                color: isAuto ? '#0a0e1a' : C.text,
+                border: `1px solid ${isAuto ? '#34d399' : 'rgba(148,163,184,0.25)'}`,
+              }}
+            >
+              {isAuto ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+              {isAuto ? '自動実行中…停止' : '自動実行'}
+            </button>
+
+            <div className="flex items-center gap-2 text-xs" style={{ color: C.dim }}>
+              <span className="ui-font">速度</span>
+              <input
+                type="range"
+                min={120}
+                max={1500}
+                step={20}
+                value={1620 - autoDelay}
+                onChange={(e) => setAutoDelay(1620 - Number(e.target.value))}
+                className="w-32 accent-amber-400"
+              />
+              <span style={{ color: C.text, minWidth: 38 }}>{autoDelay}ms</span>
+            </div>
+
+            <div className="h-6 w-px" style={{ background: C.panelBorder }} />
+
+            <div className="flex items-center gap-2 text-xs" style={{ color: C.dim }}>
+              <span className="ui-font">学習率 η</span>
+              <input
+                type="range"
+                min={0.01}
+                max={0.5}
+                step={0.01}
+                value={lr}
+                onChange={(e) => setLr(Number(e.target.value))}
+                className="w-28 accent-amber-400"
+              />
+              <span style={{ color: C.text, minWidth: 36 }}>{lr.toFixed(2)}</span>
+            </div>
+
+            <div className="flex-1" />
+
+            <button
+              className="action pill px-3 py-2 rounded text-sm flex items-center gap-1.5"
+              onClick={reset}
+              style={{
+                background: 'rgba(148,163,184,0.1)',
+                color: C.text,
+                border: '1px solid rgba(148,163,184,0.25)',
+              }}
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              重み初期化
+            </button>
+          </div>
+
+          {/* ---- row 2: termination conditions ---- */}
+          <div className="flex flex-wrap items-center gap-3 pt-2 border-t" style={{ borderColor: C.panelBorder }}>
+            <span className="text-[10px] tracking-widest ui-font flex items-center gap-1.5" style={{ color: C.dim }}>
+              <Target className="w-3 h-3" />
+              自動実行の終了条件
+            </span>
+
+            <div className="flex items-center gap-2 text-xs" style={{ color: C.dim }}>
+              <span className="ui-font">最大ステップ</span>
+              <input
+                type="number"
+                min={0}
+                step={50}
+                value={maxSteps}
+                onChange={(e) => setMaxSteps(Math.max(0, Number(e.target.value) || 0))}
+                className="w-20 bg-transparent rounded px-2 py-1 outline-none text-right"
+                style={{
+                  color: maxSteps > 0 ? C.text : C.dim,
+                  border: `1px solid ${C.panelBorder}`,
+                  fontFamily: 'inherit',
+                }}
+                placeholder="0=無効"
+              />
+              <span className="text-[10px]" style={{ color: C.dim }}>
+                {maxSteps > 0 ? `(残り ${Math.max(0, maxSteps - step)})` : '無効'}
+              </span>
+            </div>
+
+            <div className="h-6 w-px" style={{ background: C.panelBorder }} />
+
+            <div className="flex items-center gap-2 text-xs" style={{ color: C.dim }}>
+              <span className="ui-font">ロスしきい値</span>
+              <span>avg(直近</span>
+              <input
+                type="number"
+                min={1}
+                max={150}
+                step={1}
+                value={lossWindow}
+                onChange={(e) => setLossWindow(Math.max(1, Math.min(150, Number(e.target.value) || 10)))}
+                className="w-12 bg-transparent rounded px-1.5 py-1 outline-none text-right"
+                style={{ color: C.text, border: `1px solid ${C.panelBorder}`, fontFamily: 'inherit' }}
+              />
+              <span>) &lt;</span>
+              <input
+                type="number"
+                min={0}
+                step={0.001}
+                value={lossThreshold}
+                onChange={(e) => setLossThreshold(Math.max(0, Number(e.target.value) || 0))}
+                className="w-20 bg-transparent rounded px-2 py-1 outline-none text-right"
+                style={{
+                  color: lossThreshold > 0 ? C.text : C.dim,
+                  border: `1px solid ${C.panelBorder}`,
+                  fontFamily: 'inherit',
+                }}
+                placeholder="0=無効"
+              />
+              <span className="text-[10px]" style={{ color: C.dim }}>
+                {lossThreshold > 0
+                  ? `(現在 ${avgLoss === Infinity ? '—' : avgLoss.toFixed(4)})`
+                  : '無効'}
+              </span>
+            </div>
+
+            <div className="flex-1" />
+
+            {stopReason && (
+              <div
+                className="text-xs px-3 py-1.5 rounded flex items-center gap-2"
+                style={{
+                  color: '#34d399',
+                  background: 'rgba(52, 211, 153, 0.08)',
+                  border: '1px solid rgba(52, 211, 153, 0.3)',
+                }}
+              >
+                <span className="text-base leading-none">⏸</span>
+                <span>停止: {stopReason}</span>
+                <button
+                  onClick={() => setStopReason(null)}
+                  className="ml-1 opacity-60 hover:opacity-100"
+                  style={{ color: '#34d399' }}
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <footer className="mt-6 pt-4 text-[10px] tracking-widest text-center ui-font" style={{ color: C.dim, borderTop: `1px solid ${C.panelBorder}` }}>
+          ∂L / ∂W = ∂L / ∂y · ∂y / ∂a · ∂a / ∂z · ∂z / ∂W &nbsp;·&nbsp; CHAIN RULE IN MOTION
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+//                  Helpers / Subcomponents
+// ============================================================
+function Stat({ label, value, accent }) {
+  return (
+    <div className="flex flex-col items-end">
+      <span className="text-[10px] tracking-widest" style={{ color: C.dim }}>{label}</span>
+      <span className="text-sm font-medium tracking-wider" style={{ color: accent || C.text }}>{value}</span>
+    </div>
+  );
+}
+
+// ----------- Network Diagram -----------
+function NetworkDiagram({
+  params, inputs, fwd, grads, target, phase,
+  showHidden, showOutput, showGrad, hovered, setHovered,
+}) {
+  const { W1, b1, W2, b2 } = params;
+
+  return (
+    <svg
+      viewBox={`0 0 ${SVG_W} ${SVG_H}`}
+      className="w-full"
+      style={{ height: 460, display: 'block' }}
+    >
+      {/* layer labels */}
+      <g style={{ fontFamily: '"IBM Plex Sans", sans-serif', fontSize: 11, fill: C.dim, letterSpacing: 2 }}>
+        <text x={INPUT_X} y={28} textAnchor="middle">INPUT</text>
+        <text x={HIDDEN_X} y={28} textAnchor="middle">HIDDEN · tanh</text>
+        <text x={OUTPUT_X} y={28} textAnchor="middle">OUTPUT</text>
+      </g>
+
+      {/* axis lines (subtle) */}
+      <g stroke="rgba(148,163,184,0.08)" strokeWidth="1">
+        <line x1={INPUT_X} y1={40} x2={INPUT_X} y2={SVG_H - 20} />
+        <line x1={HIDDEN_X} y1={40} x2={HIDDEN_X} y2={SVG_H - 20} />
+        <line x1={OUTPUT_X} y1={40} x2={OUTPUT_X} y2={SVG_H - 20} />
+      </g>
+
+      {/* === Edges INPUT -> HIDDEN === */}
+      {INPUT_YS.map((iy, j) =>
+        HIDDEN_YS.map((hy, i) => {
+          const w = W1[i][j];
+          const isHover = hovered?.type === 'edge1' && hovered.i === i && hovered.j === j;
+          const animKey = `e1-${phase}-${i}-${j}`;
+          return (
+            <g key={`e1-${i}-${j}`}>
+              <line
+                x1={INPUT_X + NODE_R}
+                y1={iy}
+                x2={HIDDEN_X - NODE_R}
+                y2={hy}
+                stroke={weightStroke(w, isHover ? 1 : 0.85)}
+                strokeWidth={weightWidth(w) + (isHover ? 1.2 : 0)}
+                strokeDasharray={phase === 'forward' ? '4 6' : 'none'}
+                className={phase === 'forward' ? 'pulse-fwd' : ''}
+                key={animKey}
+              />
+              <line
+                x1={INPUT_X + NODE_R}
+                y1={iy}
+                x2={HIDDEN_X - NODE_R}
+                y2={hy}
+                stroke="transparent"
+                strokeWidth={10}
+                style={{ cursor: 'pointer' }}
+                onMouseEnter={() =>
+                  setHovered({
+                    type: 'edge1', i, j,
+                    weight: w,
+                    grad: grads.dW1[i][j],
+                  })
+                }
+                onMouseLeave={() => setHovered(null)}
+              />
+            </g>
+          );
+        })
+      )}
+
+      {/* === Edges HIDDEN -> OUTPUT === */}
+      {HIDDEN_YS.map((hy, i) => {
+        const w = W2[i];
+        const isHover = hovered?.type === 'edge2' && hovered.i === i;
+        const animKey = `e2-${phase}-${i}`;
+        return (
+          <g key={`e2-${i}`}>
+            <line
+              x1={HIDDEN_X + NODE_R}
+              y1={hy}
+              x2={OUTPUT_X - NODE_R}
+              y2={OUTPUT_Y}
+              stroke={weightStroke(w, isHover ? 1 : 0.85)}
+              strokeWidth={weightWidth(w) + (isHover ? 1.2 : 0)}
+              strokeDasharray={phase === 'forward' || phase === 'backward' ? '4 6' : 'none'}
+              className={
+                phase === 'forward' ? 'pulse-fwd' :
+                phase === 'backward' ? 'pulse-bwd' : ''
+              }
+              key={animKey}
+            />
+            <line
+              x1={HIDDEN_X + NODE_R}
+              y1={hy}
+              x2={OUTPUT_X - NODE_R}
+              y2={OUTPUT_Y}
+              stroke="transparent"
+              strokeWidth={10}
+              style={{ cursor: 'pointer' }}
+              onMouseEnter={() =>
+                setHovered({
+                  type: 'edge2', i,
+                  weight: w,
+                  grad: grads.dW2[i],
+                })
+              }
+              onMouseLeave={() => setHovered(null)}
+            />
+          </g>
+        );
+      })}
+
+      {/* === Input nodes === */}
+      {INPUT_YS.map((y, i) => (
+        <Node
+          key={`in-${i}`}
+          x={INPUT_X}
+          y={y}
+          label={`x${i + 1}`}
+          value={inputs[i]}
+          grad={null}
+          showVal={true}
+          showGrad={false}
+          phase={phase}
+          variant="input"
+          onHover={() =>
+            setHovered({ type: 'input', i, value: inputs[i] })
+          }
+          onLeave={() => setHovered(null)}
+          isHover={hovered?.type === 'input' && hovered.i === i}
+        />
+      ))}
+
+      {/* === Hidden nodes === */}
+      {HIDDEN_YS.map((y, i) => (
+        <Node
+          key={`h-${i}`}
+          x={HIDDEN_X}
+          y={y}
+          label={`h${i + 1}`}
+          value={fwd.a1[i]}
+          preActiv={fwd.z1[i]}
+          bias={params.b1[i]}
+          grad={grads.dz1[i]}
+          showVal={showHidden}
+          showGrad={showGrad}
+          phase={phase}
+          variant="hidden"
+          onHover={() =>
+            setHovered({
+              type: 'hidden', i,
+              z: fwd.z1[i], a: fwd.a1[i],
+              dz: grads.dz1[i], da: grads.da1[i],
+              bias: params.b1[i], dbias: grads.db1[i],
+            })
+          }
+          onLeave={() => setHovered(null)}
+          isHover={hovered?.type === 'hidden' && hovered.i === i}
+        />
+      ))}
+
+      {/* === Output node === */}
+      <Node
+        x={OUTPUT_X}
+        y={OUTPUT_Y}
+        label="ŷ"
+        value={fwd.y}
+        bias={params.b2}
+        grad={grads.dy}
+        showVal={showOutput}
+        showGrad={showGrad}
+        phase={phase}
+        variant="output"
+        onHover={() =>
+          setHovered({
+            type: 'output',
+            y: fwd.y, target,
+            dy: grads.dy,
+            bias: params.b2, dbias: grads.db2,
+          })
+        }
+        onLeave={() => setHovered(null)}
+        isHover={hovered?.type === 'output'}
+      />
+
+      {/* target indicator next to output */}
+      {showOutput && (
+        <g transform={`translate(${OUTPUT_X + 50}, ${OUTPUT_Y})`} className="fade-in">
+          <line x1={-12} y1={0} x2={-2} y2={0} stroke={C.dim} strokeWidth={1} strokeDasharray="2 2" />
+          <text x={0} y={-6} fontSize={9} fill={C.dim} style={{ letterSpacing: 1.5, fontFamily: '"IBM Plex Sans"' }}>
+            TARGET
+          </text>
+          <text x={0} y={10} fontSize={13} fill={C.text} style={{ fontWeight: 500 }}>
+            {fmt(target, 3)}
+          </text>
+          {showGrad && (
+            <g className="slide-bwd" key={`delta-${(fwd.y - target).toFixed(4)}`}>
+              <text x={0} y={28} fontSize={11} fill={C.loss}>
+                Δ = {fmt(fwd.y - target, 3)}
+              </text>
+            </g>
+          )}
+        </g>
+      )}
+
+      {/* phase direction indicator */}
+      <g transform={`translate(${SVG_W / 2}, ${SVG_H - 8})`}>
+        {(phase === 'forward') && (
+          <g className="fade-in" style={{ fontFamily: '"IBM Plex Sans"' }}>
+            <ArrowMarker x={-90} y={0} dir="right" color={C.fwd} />
+            <text x={0} y={4} textAnchor="middle" fontSize={10} fill={C.fwd} style={{ letterSpacing: 2 }}>
+              FORWARD PROPAGATION →
+            </text>
+            <ArrowMarker x={90} y={0} dir="right" color={C.fwd} />
+          </g>
+        )}
+        {(phase === 'backward') && (
+          <g className="fade-in" style={{ fontFamily: '"IBM Plex Sans"' }}>
+            <ArrowMarker x={-100} y={0} dir="left" color={C.grad} />
+            <text x={0} y={4} textAnchor="middle" fontSize={10} fill={C.grad} style={{ letterSpacing: 2 }}>
+              ← BACKPROPAGATION OF GRADIENT
+            </text>
+            <ArrowMarker x={100} y={0} dir="left" color={C.grad} />
+          </g>
+        )}
+        {(phase === 'updated') && (
+          <g className="fade-in" style={{ fontFamily: '"IBM Plex Sans"' }}>
+            <text x={0} y={4} textAnchor="middle" fontSize={10} fill="#34d399" style={{ letterSpacing: 2 }}>
+              ✱ WEIGHTS UPDATED · W ← W − η · ∂L/∂W
+            </text>
+          </g>
+        )}
+      </g>
+    </svg>
+  );
+}
+
+function ArrowMarker({ x, y, dir, color }) {
+  const d = dir === 'right' ? 1 : -1;
+  return (
+    <polygon
+      points={`${x},${y - 4} ${x + d * 8},${y} ${x},${y + 4}`}
+      fill={color}
+    />
+  );
+}
+
+// ----------- Single network node -----------
+function Node({
+  x, y, label, value, grad, showVal, showGrad, phase, variant,
+  preActiv, bias, onHover, onLeave, isHover,
+}) {
+  const isInput = variant === 'input';
+  const isOutput = variant === 'output';
+  const fillBg = 'rgba(15, 23, 42, 0.95)';
+  const strokeColor = isHover ? C.fwd : 'rgba(148,163,184,0.4)';
+
+  // glow effect strength based on value magnitude
+  const glow = showVal ? Math.min(Math.abs(value) || 0, 1) : 0;
+
+  return (
+    <g
+      onMouseEnter={onHover}
+      onMouseLeave={onLeave}
+      style={{ cursor: 'pointer' }}
+    >
+      {/* glow */}
+      {glow > 0.05 && (
+        <circle
+          cx={x} cy={y} r={NODE_R + 6}
+          fill={value >= 0 ? C.fwdGlow : 'rgba(244, 114, 182, 0.2)'}
+          opacity={0.4 + glow * 0.6}
+          style={{ filter: 'blur(6px)' }}
+        />
+      )}
+      {/* main circle */}
+      <circle
+        cx={x} cy={y} r={NODE_R}
+        fill={fillBg}
+        stroke={strokeColor}
+        strokeWidth={isHover ? 1.5 : 1}
+      />
+      {/* label inside */}
+      <text
+        x={x} y={y - 8}
+        textAnchor="middle"
+        fontSize={11}
+        fill={C.dim}
+        style={{ fontFamily: '"IBM Plex Sans"', letterSpacing: 1 }}
+      >
+        {label}
+      </text>
+      {/* forward value — falls in diagonally from upper-left when value changes */}
+      {(isInput || showVal) && (
+        isInput ? (
+          <text
+            x={x} y={y + 9}
+            textAnchor="middle"
+            fontSize={13}
+            fontWeight={500}
+            fill={C.fwd}
+          >
+            {fmt(value, 2)}
+          </text>
+        ) : (
+          <g className="slide-fwd" key={`fwd-${value.toFixed(4)}`}>
+            <text
+              x={x} y={y + 9}
+              textAnchor="middle"
+              fontSize={13}
+              fontWeight={500}
+              fill={C.fwd}
+            >
+              {fmt(value, 2)}
+            </text>
+          </g>
+        )
+      )}
+      {/* gradient below — rises in diagonally from lower-right when value changes */}
+      {showGrad && grad !== null && grad !== undefined && (
+        <g className="slide-bwd" key={`grad-${grad.toFixed(4)}`}>
+          <text
+            x={x} y={y + NODE_R + 14}
+            textAnchor="middle"
+            fontSize={10}
+            fill={C.grad}
+            style={{ fontFamily: '"IBM Plex Mono"' }}
+          >
+            δ = {fmt(grad, 3)}
+          </text>
+        </g>
+      )}
+      {/* show z (pre-activation) above for hidden when hovered */}
+      {variant === 'hidden' && showVal && isHover && (
+        <text
+          x={x} y={y - NODE_R - 6}
+          textAnchor="middle"
+          fontSize={9}
+          fill={C.dim}
+        >
+          z = {fmt(preActiv, 2)}
+        </text>
+      )}
+    </g>
+  );
+}
+
+// ----------- Hover detail panel -----------
+function HoverDetail({ h }) {
+  if (h.type === 'input') {
+    return (
+      <div>
+        <div className="ui-font text-[11px] tracking-widest" style={{ color: C.dim }}>INPUT NODE · x{h.i + 1}</div>
+        <div className="mt-1">value <span style={{ color: C.fwd }}>{fmt(h.value, 3)}</span></div>
+        <div className="text-[10px] mt-0.5" style={{ color: C.dim }}>入力ノードはサンプルから直接与えられる値です（勾配は不要）。</div>
+      </div>
+    );
+  }
+  if (h.type === 'hidden') {
+    return (
+      <div>
+        <div className="ui-font text-[11px] tracking-widest" style={{ color: C.dim }}>HIDDEN NODE · h{h.i + 1}</div>
+        <div className="grid grid-cols-2 gap-x-6 gap-y-0.5 mt-1">
+          <div>z = Σwᵢxᵢ + b = <span style={{ color: C.fwd }}>{fmt(h.z, 3)}</span></div>
+          <div>a = tanh(z) = <span style={{ color: C.fwd }}>{fmt(h.a, 3)}</span></div>
+          <div>∂L/∂a = <span style={{ color: C.grad }}>{fmt(h.da, 3)}</span></div>
+          <div>∂L/∂z = ∂L/∂a · (1 − a²) = <span style={{ color: C.grad }}>{fmt(h.dz, 3)}</span></div>
+          <div>bias = {fmt(h.bias, 3)}</div>
+          <div>∂L/∂b = <span style={{ color: C.grad }}>{fmt(h.dbias, 3)}</span></div>
+        </div>
+      </div>
+    );
+  }
+  if (h.type === 'output') {
+    return (
+      <div>
+        <div className="ui-font text-[11px] tracking-widest" style={{ color: C.dim }}>OUTPUT NODE · ŷ</div>
+        <div className="grid grid-cols-2 gap-x-6 gap-y-0.5 mt-1">
+          <div>ŷ = Σwᵢaᵢ + b = <span style={{ color: C.fwd }}>{fmt(h.y, 3)}</span></div>
+          <div>target = {fmt(h.target, 3)}</div>
+          <div>L = ½(ŷ − t)² = <span style={{ color: C.loss }}>{fmt(0.5 * (h.y - h.target) ** 2, 4).replace(/^\+/, '')}</span></div>
+          <div>∂L/∂ŷ = ŷ − t = <span style={{ color: C.grad }}>{fmt(h.dy, 3)}</span></div>
+          <div>bias = {fmt(h.bias, 3)}</div>
+          <div>∂L/∂b = <span style={{ color: C.grad }}>{fmt(h.dbias, 3)}</span></div>
+        </div>
+      </div>
+    );
+  }
+  if (h.type === 'edge1') {
+    return (
+      <div>
+        <div className="ui-font text-[11px] tracking-widest" style={{ color: C.dim }}>WEIGHT · W₁[h{h.i + 1}, x{h.j + 1}]</div>
+        <div className="grid grid-cols-2 gap-x-6 gap-y-0.5 mt-1">
+          <div>w = <span style={{ color: h.weight >= 0 ? '#fbbf24' : '#38bdf8' }}>{fmt(h.weight, 3)}</span></div>
+          <div>∂L/∂w = ∂L/∂z · x = <span style={{ color: C.grad }}>{fmt(h.grad, 3)}</span></div>
+        </div>
+      </div>
+    );
+  }
+  if (h.type === 'edge2') {
+    return (
+      <div>
+        <div className="ui-font text-[11px] tracking-widest" style={{ color: C.dim }}>WEIGHT · W₂[h{h.i + 1} → ŷ]</div>
+        <div className="grid grid-cols-2 gap-x-6 gap-y-0.5 mt-1">
+          <div>w = <span style={{ color: h.weight >= 0 ? '#fbbf24' : '#38bdf8' }}>{fmt(h.weight, 3)}</span></div>
+          <div>∂L/∂w = ∂L/∂ŷ · a = <span style={{ color: C.grad }}>{fmt(h.grad, 3)}</span></div>
+        </div>
+      </div>
+    );
+  }
+  if (h.type === 'param') {
+    return (
+      <div>
+        <div className="ui-font text-[11px] tracking-widest" style={{ color: C.dim }}>{h.name}</div>
+        <div className="mt-1">value = <span style={{ color: h.weight >= 0 ? C.fwd : '#38bdf8' }}>{fmt(h.weight, 4)}</span></div>
+        <div>gradient = <span style={{ color: C.grad }}>{fmt(h.grad, 4)}</span></div>
+      </div>
+    );
+  }
+  return null;
+}
+
+// ----------- Sample panel -----------
+function SamplePanel({ inputs, target, prediction, loss, targetType, setTargetType, setInputs }) {
+  return (
+    <div className="rounded-lg p-3" style={{ background: C.panel, border: `1px solid ${C.panelBorder}` }}>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[10px] tracking-widest ui-font" style={{ color: C.dim }}>CURRENT SAMPLE</span>
+        <button
+          className="text-xs flex items-center gap-1 hover:text-amber-400 transition-colors"
+          onClick={() => setInputs(newSample())}
+          style={{ color: C.dim }}
+        >
+          <Shuffle className="w-3 h-3" /> 入力ランダム化
+        </button>
+      </div>
+
+      <div className="grid grid-cols-3 gap-2 mb-3">
+        {inputs.map((v, i) => (
+          <div key={i} className="rounded p-2" style={{ background: 'rgba(0,0,0,0.25)' }}>
+            <div className="text-[9px] tracking-widest" style={{ color: C.dim }}>x{i + 1}</div>
+            <input
+              type="number"
+              step={0.05}
+              min={-1}
+              max={1}
+              value={v}
+              onChange={(e) => {
+                const newVal = Math.max(-1, Math.min(1, Number(e.target.value)));
+                setInputs(inputs.map((x, j) => (j === i ? newVal : x)));
+              }}
+              className="w-full bg-transparent text-sm outline-none mt-0.5"
+              style={{ color: C.fwd }}
+            />
+          </div>
+        ))}
+      </div>
+
+      <div className="text-[10px] tracking-widest mb-1 ui-font" style={{ color: C.dim }}>TARGET FUNCTION</div>
+      <select
+        value={targetType}
+        onChange={(e) => setTargetType(e.target.value)}
+        className="w-full bg-transparent text-xs px-2 py-1.5 rounded outline-none mb-3"
+        style={{
+          color: C.text,
+          background: 'rgba(0,0,0,0.25)',
+          border: `1px solid ${C.panelBorder}`,
+        }}
+      >
+        {Object.entries(TARGET_FNS).map(([k, v]) => (
+          <option key={k} value={k} style={{ background: '#0f1729' }}>{v.name}</option>
+        ))}
+      </select>
+
+      <div className="grid grid-cols-3 gap-2 text-xs">
+        <Mini label="TARGET t" value={fmt(target, 3)} color={C.text} />
+        <Mini label="PRED ŷ" value={fmt(prediction, 3)} color={C.fwd} />
+        <Mini label="LOSS L" value={fmt(loss, 4).replace(/^\+/, '')} color={C.loss} />
+      </div>
+    </div>
+  );
+}
+
+function Mini({ label, value, color }) {
+  return (
+    <div className="rounded p-1.5" style={{ background: 'rgba(0,0,0,0.25)' }}>
+      <div className="text-[9px] tracking-widest" style={{ color: C.dim }}>{label}</div>
+      <div className="text-sm" style={{ color }}>{value}</div>
+    </div>
+  );
+}
+
+// ----------- Loss chart -----------
+function LossChart({ losses }) {
+  const W = 320, H = 110, P = 8;
+  const max = Math.max(0.001, ...losses.slice(-100));
+  const lastN = losses.slice(-100);
+  const points = lastN.map((l, i) => {
+    const x = P + (i / Math.max(1, lastN.length - 1)) * (W - P * 2);
+    const y = H - P - (l / max) * (H - P * 2);
+    return [x, y];
+  });
+  const path = points.length > 1
+    ? 'M ' + points.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' L ')
+    : '';
+
+  return (
+    <div className="rounded-lg p-3" style={{ background: C.panel, border: `1px solid ${C.panelBorder}` }}>
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-[10px] tracking-widest ui-font" style={{ color: C.dim }}>LOSS · LAST {Math.min(lastN.length, 100)} STEPS</span>
+        <span className="text-[10px]" style={{ color: C.dim }}>
+          max {max.toFixed(3)}
+        </span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: H }}>
+        {/* grid */}
+        <line x1={P} y1={H - P} x2={W - P} y2={H - P} stroke="rgba(148,163,184,0.15)" />
+        <line x1={P} y1={P} x2={P} y2={H - P} stroke="rgba(148,163,184,0.15)" />
+        <line x1={P} y1={H - P - (H - P * 2) * 0.5} x2={W - P} y2={H - P - (H - P * 2) * 0.5}
+              stroke="rgba(148,163,184,0.08)" strokeDasharray="2 4" />
+        {/* line */}
+        {path && (
+          <>
+            <path d={path} stroke={C.loss} strokeWidth={1.5} fill="none" />
+            <path
+              d={path + ` L ${points[points.length - 1][0]},${H - P} L ${points[0][0]},${H - P} Z`}
+              fill={C.loss}
+              opacity={0.12}
+            />
+          </>
+        )}
+        {/* current point */}
+        {points.length > 0 && (
+          <circle cx={points[points.length - 1][0]} cy={points[points.length - 1][1]} r={3}
+                  fill={C.loss} stroke={C.bg} strokeWidth={1.5} />
+        )}
+        {lastN.length === 0 && (
+          <text x={W / 2} y={H / 2} textAnchor="middle" fontSize={11} fill={C.dim}>
+            重み更新を実行すると、ここに損失が表示されます
+          </text>
+        )}
+      </svg>
+    </div>
+  );
+}
+
+// ----------- Params panel -----------
+function ParamsPanel({ params, grads, showGrad, setHovered }) {
+  const { W1, b1, W2, b2 } = params;
+  return (
+    <div className="rounded-lg p-3" style={{ background: C.panel, border: `1px solid ${C.panelBorder}` }}>
+      <div className="text-[10px] tracking-widest ui-font mb-2" style={{ color: C.dim }}>PARAMETERS</div>
+
+      <div className="text-[10px]" style={{ color: C.dim }}>W₁ <span className="text-[9px]">(hidden ← input)</span></div>
+      <div className="grid grid-cols-3 gap-1 mt-1 mb-2">
+        {W1.map((row, i) =>
+          row.map((w, j) => (
+            <div
+              key={`w1-${i}-${j}`}
+              className="rounded text-center py-1 cursor-pointer hover:ring-1"
+              style={{
+                background: 'rgba(0,0,0,0.25)',
+                color: w >= 0 ? C.fwd : '#38bdf8',
+                fontSize: 10,
+              }}
+              onMouseEnter={() => setHovered({
+                type: 'param',
+                name: `W₁[h${i+1}, x${j+1}]`,
+                weight: w, grad: grads.dW1[i][j],
+              })}
+              onMouseLeave={() => setHovered(null)}
+            >
+              {fmt(w, 2)}
+            </div>
+          ))
+        )}
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 mt-2">
+        <div>
+          <div className="text-[10px]" style={{ color: C.dim }}>b₁</div>
+          <div className="grid grid-cols-2 gap-1 mt-1">
+            {b1.map((b, i) => (
+              <div
+                key={`b1-${i}`}
+                className="rounded text-center py-1 cursor-pointer"
+                style={{ background: 'rgba(0,0,0,0.25)', color: b >= 0 ? C.fwd : '#38bdf8', fontSize: 10 }}
+                onMouseEnter={() => setHovered({ type: 'param', name: `b₁[h${i+1}]`, weight: b, grad: grads.db1[i] })}
+                onMouseLeave={() => setHovered(null)}
+              >
+                {fmt(b, 2)}
+              </div>
+            ))}
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px]" style={{ color: C.dim }}>W₂</div>
+          <div className="grid grid-cols-2 gap-1 mt-1">
+            {W2.map((w, i) => (
+              <div
+                key={`w2-${i}`}
+                className="rounded text-center py-1 cursor-pointer"
+                style={{ background: 'rgba(0,0,0,0.25)', color: w >= 0 ? C.fwd : '#38bdf8', fontSize: 10 }}
+                onMouseEnter={() => setHovered({ type: 'param', name: `W₂[h${i+1} → ŷ]`, weight: w, grad: grads.dW2[i] })}
+                onMouseLeave={() => setHovered(null)}
+              >
+                {fmt(w, 2)}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="text-[10px] mt-2 flex justify-between" style={{ color: C.dim }}>
+        <span>b₂</span>
+        <span style={{ color: b2 >= 0 ? C.fwd : '#38bdf8' }}>{fmt(b2, 3)}</span>
+      </div>
+    </div>
+  );
+}
+
+    // ---- mount ----
+    const root = createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
